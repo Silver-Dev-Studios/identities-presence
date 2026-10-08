@@ -1,6 +1,6 @@
 # Identity Presence API
 
-A small, self-hosted **Discord presence API** — live status, activities, and now-playing data for any Discord user — open for anyone to use. It is the service behind the live blocks (Identity panel, Spotify now-playing, Discord activity) on [identities.dev](https://github.com/Silver-Dev-Studios/identities.dev).
+A small, self-hosted **Discord presence API** — live status, activities, now-playing data, and the **server profile** (nickname, server avatar, bio, pronouns, roles) for any Discord user — open for anyone to use. It is the service behind the live blocks (Identity panel, Spotify now-playing, Discord activity) on [identities.dev](https://github.com/Silver-Dev-Studios/identities.dev).
 
 It speaks the same wire protocol as [Lanyard](https://github.com/Phineas/lanyard) (`GET /v1/users/:id` + `wss://…/socket`), so any client that already speaks Lanyard works against it unchanged.
 
@@ -54,6 +54,20 @@ curl https://identities-presence-uwui.onrender.com/v1/users/1360925264669966338
     "active_on_discord_desktop": false,
     "active_on_discord_mobile": false,
     "kv": {},
+    "server_profile": {
+      "guild_id": "1537587540281000067",
+      "guild_name": "identities.dev",
+      "guild_icon": null,
+      "nick": "Spooky Clouded",
+      "avatar": null,
+      "banner": null,
+      "bio": "building identities.dev",
+      "pronouns": "he/him",
+      "joined_at": "2023-05-01T12:00:00.000000+00:00",
+      "flags": 0,
+      "roles": ["1040000000000000001"],
+      "recv_at": 1790714766623
+    },
     "recv_at": 1790714766623
   }
 }
@@ -78,7 +92,49 @@ A successful response wraps the data in a `data` object:
 | `active_on_discord_desktop` | `true` when online on desktop. |
 | `active_on_discord_mobile` | `true` when online on mobile. |
 | `kv` | Reserved key/value bag (always `{}` for now). |
+| `server_profile` | The user's profile inside the server they share with the bot — see [Server profile](#server-profile) below. `null` when the user isn't a member of the configured server. |
 | `recv_at` | Unix ms timestamp of the last gateway update. |
+
+### Server profile
+
+The API exposes each user's **server profile** — their profile inside the server the bot shares with them. On the public instance that's the identities.dev community server (guild `1537587540281000067`); self-hosted instances configure their own via `SERVER_PROFILE_GUILD` (see [Run your own instance](#run-your-own-instance)). This is deliberately a **one-server** feature: the API serves a profile for this single server and this one only — a profile request for any other guild returns no `server_profile`.
+
+`server_profile` appears as a field on:
+
+- the `data` object of `GET /v1/users/:id` (shown in the [Quick start](#quick-start)),
+- each presence object pushed over the WebSocket (`INIT_STATE` / `PRESENCE_UPDATE`),
+- the `data` object of `GET /v1/guilds/:gid/members/:uid` — but **only** when the guild is the configured server-profile guild.
+
+| Field | Meaning |
+|---|---|
+| `guild_id` | The server the profile comes from (the configured `SERVER_PROFILE_GUILD`). |
+| `guild_name` | The server's name. |
+| `guild_icon` | The server's icon hash, or `null`. |
+| `nick` | The user's nickname in the server, or `null` if they haven't set one. |
+| `avatar` | The **server-specific** avatar hash (guild avatar), or `null` if they use their global avatar. Empty/hash as-is — build a CDN URL yourself, e.g. `https://cdn.discordapp.com/guilds/<guild_id>/users/<user id>/avatars/<avatar>` (append `.png`/`.gif` by the `a_` prefix, `?size=` to resize). |
+| `banner` | The user's banner hash, or `null`. |
+| `bio` | The user's Discord profile bio, or `null`. |
+| `pronouns` | The user's pronouns as set in Discord, or `null`. |
+| `joined_at` | When the user joined the server (ISO string), or `null`. |
+| `flags` | The member's public flags (or `null`). |
+| `roles` | Array of role ids the user currently holds in the server (empty when none). |
+| `recv_at` | Unix ms timestamp of when this profile was last seen by the bot. |
+
+When the user isn't a member of the configured server (or the server-profile feature is disabled), `server_profile` is `null` — there's no `error` unless the whole lookup fails. Privacy: a user who **leaves** the server stops being served immediately; nothing is persisted.
+
+Example — show the server nickname (falling back to the global name) alongside the status:
+
+```js
+const { data } = await (await fetch(
+  "https://identities-presence-uwui.onrender.com/v1/users/" + USER_ID
+)).json();
+
+if (data) {
+  const sp = data.server_profile;
+  const name = (sp && sp.nick) || data.discord_user.global_name || data.discord_user.username;
+  console.log(name + " · " + data.discord_status);
+}
+```
 
 **Status codes**
 
@@ -99,6 +155,22 @@ curl https://identities-presence-uwui.onrender.com/v1/guilds/1537587540281000067
 ```json
 { "success": true, "data": { "member": true, "guildId": "1537587540281000067", "userId": "1360925264669966338" } }
 ```
+
+When the guild is the configured server-profile guild (the one server the API serves profiles for, `1537587540281000067` on the public instance), the response also carries the user's `server_profile` (see [Server profile](#server-profile)):
+
+```json
+{
+  "success": true,
+  "data": {
+    "member": true,
+    "guildId": "1537587540281000067",
+    "userId": "1360925264669966338",
+    "server_profile": { "guild_id": "1537587540281000067", "nick": "Spooky Clouded", "roles": [], "recv_at": 1790714766623 }
+  }
+}
+```
+
+Any guild *other* than the configured one gets no `server_profile` — the feature is explicitly one server.
 
 ## Live updates (WebSocket)
 
@@ -126,6 +198,8 @@ ws.onmessage = (e) => {
   }
 };
 ```
+
+Each pushed presence object also carries the same `server_profile` field as the REST snapshot (see [Server profile](#server-profile)) — a member's nickname/bio/roles are available live, not just at subscribe time.
 
 Expect the connection to drop occasionally — reopen and re-subscribe on `close` (the site's own blocks reconnect with exponential backoff). A REST primer + WS is also fine: fetch once to paint fast, then let updates flow in.
 
@@ -192,8 +266,11 @@ DISCORD_BOT_TOKEN=<your-bot-token> node server/presence.js
 | `DISCORD_BOT_TOKEN` | yes | A Discord **bot** token with the **Presence Intent** + **Server Members Intent** enabled, added to the servers whose users you want to track. |
 | `PORT` | no | Service port (Render sets this; default `8089`). |
 | `REQUIRE_GUILD_ID` | no | Guild users must join before they can add presence blocks (defaults to the identities.dev community server; empty = no gate). |
+| `SERVER_PROFILE_GUILD` | no | The **single** guild whose members' server profile the API exposes (default `1537587540281000067` — the identities.dev community server). Empty string disables the server-profile feature. |
 | `PUBLIC_BASE` | no | Canonical public URL of the service (defaults to the hosted instance). |
 | `PRESENCE_API` | no | Discord REST base for tests (defaults `https://discord.com/api`). |
+
+> **Server profile needs the Server Members intent.** The bot sees a member's nickname, server avatar, bio, and roles through the **Server Members Intent** on `GUILD_CREATE` / `GUILD_MEMBER_UPDATE` — make sure it's enabled along with the Presence Intent in the developer portal, or `server_profile` will only be filled by the REST fallback when the bot can fetch the member directly.
 
 The bot only sees users it shares a guild with — that model is inherent to Discord presence, not a limitation of this code. Enable the intents in the [Discord developer portal](https://discord.com/developers/applications), add the bot to your server(s), and you're done.
 
@@ -203,9 +280,11 @@ The bot only sees users it shares a guild with — that model is inherent to Dis
 
 - **Monitored = shares a guild with the bot.** Joining the [community Discord](https://discord.gg/vubY4SerXQ) is the only gate on the public instance — the bot starts watching you within about a minute. Users who aren't members return `user_not_monitored`. (A user whose identity is known but whose presence is unseen can come back as an `offline` snapshot instead.)
 
+- **Server profile = the one configured server.** `server_profile` is served for a single server (`SERVER_PROFILE_GUILD` — the identities.dev community server on the public instance). A non-member of that server gets `"server_profile": null`; other guilds never carry a profile. Server-profile fields update live over the WebSocket and clear when a user leaves the server.
+
 - **Free service can idle.** Cold starts take a few seconds — treat slow first fetches and WS reconnects as normal. If the service is down, patch with a short cache and retry.
 
-- **The site's blocks use the same protocol.** The identities.dev live blocks (`lanyard`, `spotify`, `activity`) and the site's bot slash commands answer with this service's data — everything over the same op-based protocol.
+- **The site's blocks use the same protocol.** The identities.dev live blocks (`lanyard`, `spotify`, `activity`) and the site's bot slash commands answer with this service's data — everything over the same op-based protocol. The site's `{discord.server.*}` tokens (server nick, server pfp, bio, pronouns) are filled from this same `server_profile` field.
 
 - **No keys, no tracking.** Reads are anonymous and untracked — no auth to speak of. The service caches presence in memory per user and holds one subscription per connected client; it doesn't log or expose anything else.
 
